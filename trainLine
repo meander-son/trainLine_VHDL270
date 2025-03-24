@@ -1,0 +1,270 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+use IEEE.STD_LOGIC_UNSIGNED.ALL;
+use IEEE.STD_LOGIC_ARITH.ALL;
+
+entity seven_segment_display_VHDL is
+    Port ( 
+        clock_100Mhz    : in STD_LOGIC;
+        reset           : in STD_LOGIC;
+        pause_button    : in STD_LOGIC;
+        Anode_Activate  : out STD_LOGIC_VECTOR (3 downto 0);
+        LED_out         : out STD_LOGIC_VECTOR (6 downto 0);
+        dp              : out STD_LOGIC;
+        leds            : out STD_LOGIC_VECTOR(15 downto 0)
+    );
+end seven_segment_display_VHDL;
+
+architecture Behavioral of seven_segment_display_VHDL is
+
+    -- Clock-related counters
+    signal one_second_counter : STD_LOGIC_VECTOR(27 downto 0);
+    signal one_second_enable  : STD_LOGIC;
+    signal blink_counter      : STD_LOGIC_VECTOR(24 downto 0);
+    signal blink_enable       : STD_LOGIC := '0';
+    signal refresh_counter    : STD_LOGIC_VECTOR(19 downto 0);
+    signal LED_activating_counter : STD_LOGIC_VECTOR(1 downto 0);
+
+    -- 7-segment display values
+    signal LED_BCD           : STD_LOGIC_VECTOR(3 downto 0);
+    signal displayed_number  : STD_LOGIC_VECTOR(15 downto 0);
+    signal hour_tens, hour_units     : STD_LOGIC_VECTOR(3 downto 0);
+    signal minute_tens, minute_units : STD_LOGIC_VECTOR(3 downto 0);
+
+    -- Time tracking
+    constant START_HOUR    : INTEGER := 3;
+    constant START_MINUTES : INTEGER := 0;
+    signal hours   : INTEGER range 0 to 59 := START_HOUR;
+    signal minutes : INTEGER range 0 to 59 := START_MINUTES;
+
+    -- Pause button logic
+    signal is_paused        : STD_LOGIC := '0';
+    signal button_debounced : STD_LOGIC := '0';
+    signal prev_button      : STD_LOGIC := '0';
+
+    -- Train progression
+    type time_array is array(0 to 7) of INTEGER range 0 to 1439;
+    constant time_checkpoints : time_array := (
+        180, 480, 720, 900, 1080, 1200, 1320, 1380
+    );
+    signal checkpoint_index   : INTEGER range 0 to 7 := 0;
+    signal checkpoint_reached : STD_LOGIC := '0';
+    signal current_led        : INTEGER range 0 to 15 := 0;
+    signal flashing_led       : INTEGER range 0 to 15 := 1;
+    signal show_flashing      : STD_LOGIC := '1';
+    signal system_started     : STD_LOGIC := '0';
+
+begin
+
+    -- Colon always ON
+    dp <= '0';
+
+    -------------------------------------------------------------------------
+    -- Blinking logic (~1 second)
+    -------------------------------------------------------------------------
+    process(clock_100Mhz)
+    begin
+        if rising_edge(clock_100Mhz) then
+            blink_counter <= blink_counter + 1;
+            if blink_counter = x"989680" then
+                blink_counter <= (others => '0');
+                blink_enable <= not blink_enable;
+            end if;
+        end if;
+    end process;
+
+    -------------------------------------------------------------------------
+    -- LED Bar Display
+    -------------------------------------------------------------------------
+    process(current_led, flashing_led, blink_enable, show_flashing)
+        variable temp_leds : STD_LOGIC_VECTOR(15 downto 0);
+    begin
+        temp_leds := (others => '0');
+        for i in 0 to 15 loop
+            if i <= current_led then
+                temp_leds(i) := '1';
+            end if;
+        end loop;
+
+        if show_flashing = '1' and flashing_led <= 15 then
+            temp_leds(flashing_led) := blink_enable;
+        end if;
+
+        leds <= temp_leds;
+    end process;
+
+    -------------------------------------------------------------------------
+    -- 7-segment BCD decoder
+    -------------------------------------------------------------------------
+    process(LED_BCD)
+    begin
+        case LED_BCD is
+            when "0000" => LED_out <= "0000001";
+            when "0001" => LED_out <= "1001111";
+            when "0010" => LED_out <= "0010010";
+            when "0011" => LED_out <= "0000110";
+            when "0100" => LED_out <= "1001100";
+            when "0101" => LED_out <= "0100100";
+            when "0110" => LED_out <= "0100000";
+            when "0111" => LED_out <= "0001111";
+            when "1000" => LED_out <= "0000000";
+            when "1001" => LED_out <= "0000100";
+            when others => LED_out <= "1111111";
+        end case;
+    end process;
+
+    -------------------------------------------------------------------------
+    -- 7-segment refresh logic
+    -------------------------------------------------------------------------
+    process(clock_100Mhz, reset)
+    begin
+        if reset = '1' then
+            refresh_counter <= (others => '0');
+        elsif rising_edge(clock_100Mhz) then
+            refresh_counter <= refresh_counter + 1;
+        end if;
+    end process;
+
+    LED_activating_counter <= refresh_counter(19 downto 18);
+
+    process(LED_activating_counter)
+    begin
+        case LED_activating_counter is
+            when "00" =>
+                Anode_Activate <= "0111";
+                LED_BCD <= displayed_number(15 downto 12);
+            when "01" =>
+                Anode_Activate <= "1011";
+                LED_BCD <= displayed_number(11 downto 8);
+            when "10" =>
+                Anode_Activate <= "1101";
+                LED_BCD <= displayed_number(7 downto 4);
+            when "11" =>
+                Anode_Activate <= "1110";
+                LED_BCD <= displayed_number(3 downto 0);
+        end case;
+    end process;
+
+    -------------------------------------------------------------------------
+    -- 1-second timer and system start detection
+    -------------------------------------------------------------------------
+    process(clock_100Mhz, reset)
+    begin
+        if reset = '1' then
+            one_second_counter <= (others => '0');
+            system_started <= '0';
+        elsif rising_edge(clock_100Mhz) then
+            if one_second_counter = x"0BEBC1F" then
+                one_second_counter <= (others => '0');
+                system_started <= '1';
+            else
+                one_second_counter <= one_second_counter + 1;
+            end if;
+        end if;
+    end process;
+
+    one_second_enable <= '1' when one_second_counter = x"0BEBC1F" else '0';
+
+    -------------------------------------------------------------------------
+    -- Debounce pause button
+    -------------------------------------------------------------------------
+    process(clock_100Mhz)
+    begin
+        if rising_edge(clock_100Mhz) then
+            if pause_button = '1' and prev_button = '0' then
+                button_debounced <= '1';
+            else
+                button_debounced <= '0';
+            end if;
+            prev_button <= pause_button;
+        end if;
+    end process;
+
+    -------------------------------------------------------------------------
+    -- Time counter
+    -------------------------------------------------------------------------
+    process(clock_100Mhz, reset)
+    begin
+        if reset = '1' then
+            hours <= START_HOUR;
+            minutes <= START_MINUTES;
+        elsif rising_edge(clock_100Mhz) then
+            if one_second_enable = '1' and is_paused = '0' then
+                if minutes = 59 then
+                    minutes <= 0;
+                    if hours = 23 then
+                        hours <= 0;
+                    else
+                        hours <= hours + 1;
+                    end if;
+                else
+                    minutes <= minutes + 1;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    -------------------------------------------------------------------------
+    -- Train progression logic (LEDs and checkpoints)
+    -------------------------------------------------------------------------
+    process(clock_100Mhz, reset)
+        variable current_minutes : INTEGER;
+    begin
+        if reset = '1' then
+            is_paused <= '0';
+            checkpoint_index <= 0;
+            current_led <= 0;
+            flashing_led <= 1;
+            show_flashing <= '1';
+            checkpoint_reached <= '0';
+        elsif rising_edge(clock_100Mhz) then
+            current_minutes := hours * 60 + minutes;
+
+            if system_started = '1' and
+               current_minutes >= time_checkpoints(checkpoint_index) and
+               checkpoint_reached = '0' then
+
+                is_paused <= '1';
+                checkpoint_reached <= '1';
+
+                if flashing_led <= 14 then
+                    current_led <= flashing_led + 1;
+                else
+                    current_led <= 15;
+                end if;
+
+                show_flashing <= '0';
+            end if;
+
+            if button_debounced = '1' and is_paused = '1' then
+                is_paused <= '0';
+                checkpoint_reached <= '0';
+
+                if current_led < 14 then
+                    flashing_led <= current_led + 1;
+                else
+                    flashing_led <= 0;
+                end if;
+
+                show_flashing <= '1';
+
+                if checkpoint_index = 7 then
+                    checkpoint_index <= 0;
+                else
+                    checkpoint_index <= checkpoint_index + 1;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    -------------------------------------------------------------------------
+    -- Convert time to BCD for 7-segment
+    -------------------------------------------------------------------------
+    hour_tens    <= conv_std_logic_vector(hours / 10, 4);
+    hour_units   <= conv_std_logic_vector(hours mod 10, 4);
+    minute_tens  <= conv_std_logic_vector(minutes / 10, 4);
+    minute_units <= conv_std_logic_vector(minutes mod 10, 4);
+
+    displayed_number <= hour_tens & hour_units & minute_tens & minute_units;
+
+end Behavioral;
